@@ -1,0 +1,36 @@
+py_tsip_proxy : a simple proxy for a Trimble Thunderbolt GPS
+
+ *** WORK IN PROGRESS, CURRENTLY IT DOESN'T REALLY DO MUCH ***
+
+This is a simple proxy so that several clients can talk to a Trimble
+Thunderbolt GPS in parallel.
+
+$ ./py_tsip_proxy.py  -h
+usage: py_tsip_proxy.py [-h] [-l DEVICE] [-b BPS] [-t HOST] [-p PORT]
+                        [-s PORT]
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -l DEVICE, --serial_line DEVICE
+                        Device to open, default /dev/ttyUSB0
+  -b BPS, --serial_baud BPS
+                        Serial port speed in bits per second.
+  -t HOST, --tcp-host HOST
+                        Hostname to connect to (via TCP, overrides serial)
+  -p PORT, --tcp-port PORT
+                        Port number for outbound tcp-connection.
+  -s PORT, --server-port PORT
+                        Port number for inbound tcp-connection.
+
+
+Run on the device connected to your GPS' serial port as such:
+
+   ./py_tsip_proxy.py -l /dev/ttyUSB0 -b 9600
+
+...or, when the GPS is connected to a terminal server, at the given
+address and port (in this example: host 192.168.2.134, port 4001):
+
+   ./py_tsip_proxy.py -t 192.168.2.134 -p 4001
+
+Then you can connect to the local machine running the proxy at port 4001.
+This port can be changed using the "-s PORT" option.

@@ -1,220 +1,255 @@
 #!/usr/bin/python
-
-# py_tsip_proxy  - A simple proxy for the Trimble Standard Interface Protocol
-#     (c) 2016 Christian Vogel <vogelchr@vogel.cx>
-#
-#  This program is free software: you can redistribute it and/or modify
-#  it under the terms of the GNU General Public License as published by
-#  the Free Software Foundation, either version 3 of the License, or
-#  (at your option) any later version.
-#
-#  This program is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
-#  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-import serial
-import serial.aio
-import argparse
-import socket
-import asyncio
+from collections import namedtuple
 import binascii
+import asyncio
+import struct
+import logging
+from logging import debug, info, warning, error, critical
 
+# https://pypi.python.org/pypi/pyserial-asyncio
+import serial_asyncio
+
+###
+# Trimble Standard Interface Protocol
+###
 DLE = 0x10
-bDLE = b'\020' # DLE as bytes
-
 ETX = 0x03
-bETX = b'\003'
 
-class TSIP_Proxy_Mgr :
-	def __init__(self) :
-		self.devices = set() # store Protocol instances
-		self.clients = set()
+Pkt_Primary_Timing = namedtuple('Primary_Timing',[
+        'time_of_week', 'week_number', 'utc_offset',
+        'timing_flags', 'seconds', 'minutes', 'hours',
+        'day_of_month', 'month', 'year'])
 
-	def add_conn(self, who) :
-		if who.is_client :
-			self.clients.add(who)
-		else :
-			self.devices.add(who)
+Pkt_Supplemental_Timing = namedtuple('Supplemental_Timing', [
+    'receiver_mode', 'disciplining_mode', 'selfsurvey_progress',
+    'holdover_duration', 'critical_alarms', 'minor_alarms',
+    'gpsdecoding_status', 'disciplining_activity', 'spare_status1',
+    'spare_status2', 'pps_offset', 'clock_offset', 'dac_value',
+    'dac_voltage', 'temperature', 'latitude', 'longitude', 'altitude',
+    'pps_quantization_error', 'spare'])
 
-		print('After add_conn(',who.peer,'):')
-		print('Devices:', [ x.peer for x in self.devices ])
-		print('Clients:', [ x.peer for x in self.clients ])
-
-	def remove_conn(self, who) :
-		if who in self.clients :
-			self.clients.remove(who)
-		if who in self.devices :
-			self.devices.remove(who)
-
-		print('After remove_conn(',who.peer,'):')
-		print('Devices:', [ x.peer for x in self.devices ])
-		print('Clients:', [ x.peer for x in self.clients ])
-
-	def proto_factory(self, is_client) :
-		tmp = [self, is_client]
-		def generate_client() :
-			return TSIP_Protocol(manager=tmp[0], is_client=tmp[1])
-		return generate_client
-
-	def packet_received(self, who, pkg) :
-		l = len(pkg)
-		if l > 32 :
-			msg = str(binascii.hexlify(pkg[0:30]),'ascii')+' ...'
-		else :
-			msg = str(binascii.hexlify(pkg),'ascii')
-
-		if who in self.devices :
-			col='\033[33m'
-		else :
-			col='\033[34m'
-		print('%s<<%s %s\033[0m'%(col, who.peer, msg))
-
-		if who in self.devices :
-			for clt in self.clients :
-				clt.send_packet(pkg)
-		else :
-			for dev in self.devices :
-				dev.send_packet(pkg)
+simple_packets = {
+    # Thunderbolt-2012-02.pdf, Appendix A, Page 79
+    '8f-ab': ( '>xIHhBBBBBBH', Pkt_Primary_Timing ),
+    # Thunderbolt-2012-02.pdf, Appendix A, Page 82
+    '8f-ac': ( '>xBBBIHHBBBBffIffdddfI', Pkt_Supplemental_Timing )
+}
 
 class TSIP_Protocol(asyncio.Protocol) :
-	def __init__(self, *args,manager=None, is_client=None, **kwargs) :
-		self.is_client=is_client
-		self.manager=manager
-		super().__init__(*args, **kwargs)
+    def __init__(self) :
+        self.name = 'undef'
+        self.transport = None
+        self.state = self._idle
+        self.buf = bytearray()
 
-	# get a nice name from the transport, also add Clt= or Dev= in front...
-	def get_name_from_transport(self) :
-		if type(self.transport) is serial.aio.SerialTransport :
-			peer = self.transport.serial.port
-		else :
-			host,port = self.transport.get_extra_info('peername')
-			peer = 'TCP:%s:%d'%(host, port)
+    # state handlers --------------------------------------------------------
+    def _idle(self, c) :
+        if c == DLE :
+            self.buf.clear()
+            return self._data
+        warning('%s received junk byte %02x', self.name, c)
 
-		if self.is_client :
-			return 'Clt='+peer
-		return 'Dev='+peer
+    def _data(self, c) :
+        if c == DLE :
+            return self._dle_recv
+        self.buf.append(c)
 
-	def connection_made(self, transport) :
-		self.transport = transport
-		self.peer = self.get_name_from_transport()
+    def _dle_recv(self, c) :
+        # <DLE> <DLE> : escaped <DLE> inside packet
+        if c == DLE :
+            self.buf.append(c)
+            return self._data
+        # <DLE> <ETX> : end of packet
+        if c == ETX :
+            self._packet_recved(bytes(self.buf))
+            return self._idle
+        # state probably messed up and this is the ID of a new packet
+        warning('%s received stray DLE, assume new packet', self.name)
+        self.buf.clear()
+        self.buf.append(c)
+        return self._data
 
-		# for the receiving data state machine...
-		self.got_dle = False
-		self.buf = bytearray(1024)
-		self.writep = 0
+    # decoding --------------------------------------------------------------
+    def decode_simple(self, msgid, pkt, fmt, nt) :
+        if struct.calcsize(fmt) != len(pkt) :
+            warning('Need %d bytes, but have %d.', struct.calcsize(fmt), len(pkt))
+            return None
+        return nt(*struct.unpack(fmt, pkt))
 
-		self.manager.add_conn(self)
+    # packet received -------------------------------------------------------
+    def _packet_recved(self, pkt) :
+        decoded = None
+        if len(pkt) >= 2 :
+            name = '%02x-%02x'%(pkt[0], pkt[1])
+            if name in simple_packets :
+                decoded = self.decode_simple(pkt[0], pkt[1:], *simple_packets[name])
+        if len(pkt) >= 1 and not decoded :
+            name = '%02x'%(pkt[0])
+            if name in simple_packets :
+                decoded = self.decode_simple(pkt[0], pkt[1:], *simple_packets[name])
+        if not decoded :
+            decoded = binascii.hexlify(pkt).decode('ascii') + '(%d)'%(len(pkt))
 
+        txt = str(decoded)
+        if len(txt) > 40 :
+            txt = txt[:37]+'...'
+        debug('%s %s',self.name, txt)
 
-	def connection_lost(self, exc) :
-		print('Port closed:', self.peer)
-		self.manager.remove_conn(self)
+        self.process_packet(pkt)
 
-	def data_received(self, data) :
-		# <DLE> <ID> ...payload... <DLE> <ETX>
-		# <DLE> in payload is excaped by adding a second <DLE>
-		for c in data :
-			if self.got_dle :
-				self.got_dle = False
+    def process_packet(self, pkt) :
+        pass
 
-				if c == ETX :  # DLE+ETX -> end of packet
-					self.manager.packet_received(self, self.buf[0:self.writep])
-					self.writep = 0
-					continue
+    def send_packet(self, pkt) :
+        txbuf = bytearray()
+        txbuf.append(DLE)
 
-				# now it's either escaped DLE or new packet. if it's not
-				# escaped DLE but we already have some packet data queued,
-				# it's actually a framing error, for now we just set the
-				# write pointer to 0 to throw away data...
-				if c != DLE and self.writep :
-					self.writep = 0
-			else :
-				if c == DLE :  # may be escaped DLE in payload, new or end of packet
-					self.got_dle = True
-					continue
-			self.buf[self.writep] = c
-			if self.writep < len(self.buf)-1 :
-				self.writep += 1
+        for c in pkt :
+            if c == DLE :
+                txbuf.append(DLE)
+            txbuf.append(c)
 
-	def send_packet(self, pkt) :
-		# calculate space needed...
-		l = len(pkt)         # payload size
-		l += pkt.count(bDLE) # escape DLEs
-		buf = bytearray(l+3) # add DLE ... DLE ETX around payload
+        txbuf.append(DLE)
+        txbuf.append(ETX)
 
-		# packet header = DLE
-		buf[0] = DLE
-		j=1
+        self.transport.write(txbuf)
 
-		# escape all DLEs in payload
-		for c in pkt :
-			if c == DLE :      # escape DLE by doubling...
-				buf[j] = DLE
-				j += 1
-			buf[j] = c
-			j += 1
+    # connection management -------------------------------------------------
+    def connection_made(self, transport) :
+        self.transport = transport
 
-		buf[j] = DLE           # end packet with DLE ETX
-		buf[j+1] = ETX
-		j += 2
+        if type(transport) == serial_asyncio.SerialTransport :
+            myname = transport.serial.port
+        else :
+            peer = transport.get_extra_info('peername')
+            if peer is not None :
+                myname = '%s/%d'%peer
+            else :
+                myname = '???'
 
-		self.transport.write(buf)
+        if self.__class__ == TSIP_Protocol_Master :
+            self.name = 'Master %s'%(myname)
+        elif self.__class__ == TSIP_Protocol_Slave :
+            self.name = 'Slave %s'%(myname)
+        else :
+            self.name = 'TSIP %s'%(myname)
 
+        info('%s Connection made.',self.name)
+
+    def connection_lost(self, exc) :
+        info('%s Connectino lost: %s',self.name, str(exc))
+
+    def data_received(self, data) :
+        for c in data :
+            ret = self.state(c)
+            if ret is not None :
+                self.state = ret
+
+    def eof_received(self) :
+        info('%s EOF received',self.name)
+
+###
+# a master allows clients to register and forwards packets to
+# all its slaves
+###
+class TSIP_Protocol_Master(TSIP_Protocol) :
+    def __init__(self) :
+        super().__init__()
+        self.slaves = set()
+
+    def register_slave(self, slave) :
+        info('%s new slave %s',self.name, slave.name)
+        self.slaves.add(slave)
+
+    def unregister_slave(self, slave) :
+        info('%s removed slave %s',self.name, slave.name)
+        self.slaves.remove(slave)
+
+    def process_packet(self, pkt) :
+        for slave in self.slaves :
+            slave.send_packet(pkt)
+
+###
+# a slave registers with its master and forwards packets to it
+#  (if forward_to_master is True)
+###
+class TSIP_Protocol_Slave(TSIP_Protocol) :
+    def __init__(self, master, forward_to_master=False) :
+        super().__init__()
+        self.master = master
+        self.forward_to_master = forward_to_master
+
+    def connection_made(self, transport) :
+        super().connection_made(transport)
+        self.master.register_slave(self)
+
+    def connection_lost(self, exc) :
+        self.master.unregister_slave(self)
+        super().connection_lost(exc)
+
+    def process_packet(self, pkt) :
+        if self.forward_to_master :
+            self.master.send_packet(pkt)
 
 def main() :
-	parser = argparse.ArgumentParser()
+    import argparse
+    import logging
 
-	# serial
-	parser.add_argument('-l', '--serial_line', metavar='DEVICE',
-		type=str, dest='serial_line', default='/dev/ttyUSB0',
-		help='Device to open, default /dev/ttyUSB0')
-	parser.add_argument('-b', '--serial_baud', metavar='BPS',
-		type=int, dest='serial_baud', default=9600,
-		help='Serial port speed in bits per second.')
+    logging.basicConfig(
+        format='%(asctime)-15s %(message)s',
+        level=logging.INFO)
 
-	# tcp
-	parser.add_argument('-t', '--tcp-host', metavar='HOST',
-		type=str, dest='tcp_host', default=None,
-		help='Hostname to connect to (via TCP, overrides serial)')
-	parser.add_argument('-p', '--tcp-port', metavar='PORT',
-		type=int, dest='tcp_port', default=4001,
-		help='Port number for outbound tcp-connection.')
+    parser = argparse.ArgumentParser()
 
-	# server
-	parser.add_argument('-s', '--server-port', metavar='PORT',
-		type=int, dest='server_port', default=4001,
-		help='Port number for inbound tcp-connection.')
+    parser.add_argument('-t', '--tcp', metavar='PORT', dest='tcp_port',
+        type=int, action='store', default=None,
+        help='Use TCP connection to port.')
 
-	manager = TSIP_Proxy_Mgr()
+    parser.add_argument('-b', '--baud', dest='baud',
+        type=int, action='store', default=9600,
+        help='Baudrate to use on serial device (def: 9600)')
 
-	args = parser.parse_args()
-	loop = asyncio.get_event_loop()
+    parser.add_argument('-l', '--listen', dest='listen',
+        type=int, action='store', default=4321, metavar='PORT',
+        help='''Listen for local connections on tcp port whose
+packets will be forwarded to the device (def: 4321).''')
 
-	if args.tcp_host :
-		future = loop.create_connection(manager.proto_factory(is_client=False),
-			args.tcp_host, args.tcp_port)
-	else :
-		future = serial.aio.create_serial_connection(loop,
-			manager.proto_factory(is_client=False),
-			port=args.serial_line, baudrate=args.serial_baud,
-			xonxoff=False, rtscts=False, timeout=0)
-	loop.run_until_complete(future)
+    parser.add_argument('-m', '--listen-mute', dest='listen_mute',
+        type=int, action='store', default=None, metavar='PORT',
+        help='''Listen for local connections on tcp port whose
+packets will not be forwarded to the device (def: None).''')
 
-	future = loop.create_server(manager.proto_factory(is_client=True),
-		port=args.server_port)
-	loop.run_until_complete(future)
+    parser.add_argument('tty_or_host', metavar='TTY|HOST',
+        type=str, action='store', default=None,
+        help='Connect to serial device or host via the network.')
 
+    args = parser.parse_args()
+    loop = asyncio.get_event_loop()
 
-	try :
-		loop.run_forever()
-	except KeyboardInterrupt :
-		print('Ctrl-C -> exiting.')
-	finally :
-		loop.close()
+    if args.tcp_port :
+        conn_future = loop.create_connection(TSIP_Protocol_Master,
+                args.tty_or_host, args.tcp_port)
+    else :
+        conn_future = serial_asyncio.create_serial_connection(loop,
+            TSIP_Protocol_Master, args.tty_or_host, baudrate=args.baud)
 
+    transport, protocol_master = loop.run_until_complete(conn_future)
+    slave = TSIP_Protocol_Slave(protocol_master)
+
+    ###
+    # listen socket
+    ###
+    bind_future = loop.create_server(
+        lambda: TSIP_Protocol_Slave(protocol_master, True), port=args.listen)
+    loop.run_until_complete(bind_future)
+
+    if args.listen_mute :
+        bind_future = loop.create_server(
+            lambda: TSIP_Protocol_Slave(protocol_master, False),
+            port=args.listen_mute)
+        loop.run_until_complete(bind_future)
+
+    loop.run_forever()
 
 if __name__ == '__main__' :
-	main()
+    main()

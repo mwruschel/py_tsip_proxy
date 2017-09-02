@@ -4,6 +4,8 @@ import binascii
 import asyncio
 import struct
 import logging
+import datetime
+
 from logging import debug, info, warning, error, critical
 
 # https://pypi.python.org/pypi/pyserial-asyncio
@@ -28,9 +30,9 @@ Pkt_Supplemental_Timing = namedtuple('Supplemental_Timing', [
     'dac_voltage', 'temperature', 'latitude', 'longitude', 'altitude',
     'pps_quantization_error', 'spare'])
 
-simple_packets = {
+SIMPLE_PACKETS = {
     # Thunderbolt-2012-02.pdf, Appendix A, Page 79
-    '8f-ab': ( '>xIHhBBBBBBH', Pkt_Primary_Timing ),
+    '8f-ab': ( '>xIHhBBBBBBH',           Pkt_Primary_Timing      ),
     # Thunderbolt-2012-02.pdf, Appendix A, Page 82
     '8f-ac': ( '>xBBBIHHBBBBffIffdddfI', Pkt_Supplemental_Timing )
 }
@@ -69,32 +71,8 @@ class TSIP_Protocol(asyncio.Protocol) :
         self.buf.append(c)
         return self._data
 
-    # decoding --------------------------------------------------------------
-    def decode_simple(self, msgid, pkt, fmt, nt) :
-        if struct.calcsize(fmt) != len(pkt) :
-            warning('Need %d bytes, but have %d.', struct.calcsize(fmt), len(pkt))
-            return None
-        return nt(*struct.unpack(fmt, pkt))
-
     # packet received -------------------------------------------------------
     def _packet_recved(self, pkt) :
-        decoded = None
-        if len(pkt) >= 2 :
-            name = '%02x-%02x'%(pkt[0], pkt[1])
-            if name in simple_packets :
-                decoded = self.decode_simple(pkt[0], pkt[1:], *simple_packets[name])
-        if len(pkt) >= 1 and not decoded :
-            name = '%02x'%(pkt[0])
-            if name in simple_packets :
-                decoded = self.decode_simple(pkt[0], pkt[1:], *simple_packets[name])
-        if not decoded :
-            decoded = binascii.hexlify(pkt).decode('ascii') + '(%d)'%(len(pkt))
-
-        txt = str(decoded)
-        if len(txt) > 40 :
-            txt = txt[:37]+'...'
-        debug('%s %s',self.name, txt)
-
         self.process_packet(pkt)
 
     def process_packet(self, pkt) :
@@ -137,7 +115,7 @@ class TSIP_Protocol(asyncio.Protocol) :
         info('%s Connection made.',self.name)
 
     def connection_lost(self, exc) :
-        info('%s Connectino lost: %s',self.name, str(exc))
+        info('%s Connection lost: %s',self.name, str(exc))
 
     def data_received(self, data) :
         for c in data :
@@ -191,6 +169,80 @@ class TSIP_Protocol_Slave(TSIP_Protocol) :
         if self.forward_to_master :
             self.master.send_packet(pkt)
 
+class TSIP_Logger :
+    def __init__(self, logfile_basename) :
+        self.name = 'Logger'
+        self.logfile_basename = logfile_basename
+        self.primary_timing = None
+
+        self.f_lines = None
+        self.f = None
+        self.fn = None
+
+    # decoding --------------------------------------------------------------
+    def decode_simple(self, msgid, payload) :
+        if len(payload) >= 1 :
+            pkt_id = '%02x-%02x'%(msgid, payload[0])
+            simple_decoder = SIMPLE_PACKETS.get(pkt_id)
+        if not simple_decoder :
+            pkt_id = '%02x'%(payload[0])
+            simple_decoder = SIMPLE_PACKETS.get(pkt_id)
+
+        if not simple_decoder :
+            return None, payload
+
+        fmt, nt = simple_decoder
+        expect_len = struct.calcsize(fmt)
+        if expect_len != len(payload) :
+            warning('Cannot decode %s, need %d bytes, but got %d.'%(pkt_id,
+                expect_len, len(payload)))
+            return None, payload
+        return pkt_id, nt(*struct.unpack(fmt, payload))
+
+    def process_packet(self, pkt) :
+        if len(pkt) == 0 :
+            return
+        pkt_id, data = self.decode_simple(pkt[0], pkt[1:])
+
+        if type(data) == Pkt_Primary_Timing :
+            self.primary_timing = data
+            return
+
+        if type(data) is not Pkt_Supplemental_Timing :
+            return
+        if self.primary_timing is None :
+            return
+
+        ###
+        # we have a "primary timing" dataset stored, and this packet
+        # is a "supplemental timing" packet -> write out to logfile
+        ###
+
+        now = datetime.datetime.now()
+        new_fn = self.logfile_basename + now.strftime('_%Y%m%d.txt')
+        if not self.f or (new_fn != self.fn) :
+            if self.f :
+                info('%s: closing old logfile.'%(self.name))
+                self.f.close()
+            self.fn = new_fn
+            self.f = open(new_fn,'at')
+            info('%s: appending to logfile %s.'%(self.name, self.fn))
+
+        #    tstamp  tow  week flags rm dm critic minor decstat da pps    dac    temp
+        fmt='%-15.3f %6d %4d 0x%02x %d %d 0x%04x 0x%04x 0x%02x %d %+6.3f %+8.5f %6.3f'
+        p = self.primary_timing
+        s = data # supplemental
+        print(fmt%(
+            now.timestamp(),
+            p.time_of_week, p.week_number, p.timing_flags,
+            s.receiver_mode, s.disciplining_mode, s.critical_alarms,
+            s.minor_alarms, s.gpsdecoding_status, s.disciplining_activity,
+            s.pps_offset, s.dac_voltage, s.temperature
+        ), file=self.f)
+
+    send_packet = process_packet
+
+
 def main() :
     import argparse
     import logging
@@ -218,6 +270,10 @@ packets will be forwarded to the device (def: 4321).''')
         type=int, action='store', default=None, metavar='PORT',
         help='''Listen for local connections on tcp port whose
 packets will not be forwarded to the device (def: None).''')
+
+    parser.add_argument('-o', '--logfile', dest='logfile',
+        type=str, action='store', default=None, metavar='FMT',
+        help='''Write primary timing information to logfile.''')
 
     parser.add_argument('tty_or_host', metavar='TTY|HOST',
         type=str, action='store', default=None,
@@ -248,6 +304,10 @@ packets will not be forwarded to the device (def: None).''')
             lambda: TSIP_Protocol_Slave(protocol_master, False),
             port=args.listen_mute)
         loop.run_until_complete(bind_future)
+
+    if args.logfile :
+        logger = TSIP_Logger(args.logfile)
+        protocol_master.register_slave(logger)
 
     loop.run_forever()
 

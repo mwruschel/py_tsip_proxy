@@ -43,6 +43,7 @@ class TSIP_Protocol(asyncio.Protocol) :
         self.transport = None
         self.state = self._idle
         self.buf = bytearray()
+        self.do_debug = (logging.getLogger().level == logging.DEBUG)
 
     # state handlers --------------------------------------------------------
     def _idle(self, c) :
@@ -73,6 +74,19 @@ class TSIP_Protocol(asyncio.Protocol) :
 
     # packet received -------------------------------------------------------
     def _packet_recved(self, pkt) :
+        if self.do_debug :
+            if len(pkt) >= 2 :
+                pkt_name = '%02x-%02x'%(pkt[0], pkt[1])
+            elif len(pkt) == 1 :
+                pkt_name = '%02x'%(pkt[0])
+            else :
+                pkt_name = 'empty'
+
+            if len(pkt) < 11 :
+                pkt_str = binascii.hexlify(pkt).decode('ascii')
+            else :
+                pkt_str = binascii.hexlify(pkt[:10]).decode('ascii') + '..'
+            debug('%s << %-5s (%02d) %s'%(self.name, pkt_name, len(pkt), pkt_str))
         self.process_packet(pkt)
 
     def process_packet(self, pkt) :
@@ -106,11 +120,11 @@ class TSIP_Protocol(asyncio.Protocol) :
                 myname = '???'
 
         if self.__class__ == TSIP_Protocol_Master :
-            self.name = 'Master %s'%(myname)
+            self.name = 'Master %-21s'%(myname)
         elif self.__class__ == TSIP_Protocol_Slave :
-            self.name = 'Slave %s'%(myname)
+            self.name = 'Slave  %-21s'%(myname)
         else :
-            self.name = 'TSIP %s'%(myname)
+            self.name = 'TSIP   %-21s'%(myname)
 
         info('%s Connection made.',self.name)
 
@@ -247,10 +261,6 @@ def main() :
     import argparse
     import logging
 
-    logging.basicConfig(
-        format='%(asctime)-15s %(message)s',
-        level=logging.INFO)
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-t', '--tcp', metavar='PORT', dest='tcp_port',
@@ -275,11 +285,19 @@ packets will not be forwarded to the device (def: None).''')
         type=str, action='store', default=None, metavar='FMT',
         help='''Write primary timing information to logfile.''')
 
+    parser.add_argument('-d', '--debug', action='store_true', default=False,
+        help='''Write packets sent/received by each client.''')
+
     parser.add_argument('tty_or_host', metavar='TTY|HOST',
         type=str, action='store', default=None,
         help='Connect to serial device or host via the network.')
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        format='%(asctime)-15s %(message)s',
+        level=logging.DEBUG if args.debug else logging.INFO)
+
     loop = asyncio.get_event_loop()
 
     if args.tcp_port :

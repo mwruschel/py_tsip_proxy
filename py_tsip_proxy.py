@@ -69,13 +69,21 @@ class TSIP_Protocol(asyncio.Protocol) :
         self.state = self._idle
         self.buf = bytearray()
         self.do_debug = (logging.getLogger().level == logging.DEBUG)
+        self.junk = 0
 
     # state handlers --------------------------------------------------------
     def _idle(self, c) :
         if c == DLE :
+            if self.junk :
+                warning('%s %d junk bytes received waiting for DLE.',
+                    self.name, self.junk)
+                self.junk = 0
             self.buf.clear()
             return self._data
-        warning('%s received junk byte %02x', self.name, c)
+
+        self.junk += 1
+        if self.do_debug :
+            debug('%s junk byte 0x%02x'%(self.name, c))
 
     def _data(self, c) :
         if c == DLE :

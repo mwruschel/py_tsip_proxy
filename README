@@ -1,36 +1,72 @@
 py_tsip_proxy : a simple proxy for a Trimble Thunderbolt GPS
 
- *** WORK IN PROGRESS, CURRENTLY IT DOESN'T REALLY DO MUCH ***
 
 This is a simple proxy so that several clients can talk to a Trimble
 Thunderbolt GPS in parallel.
 
-$ ./py_tsip_proxy.py  -h
-usage: py_tsip_proxy.py [-h] [-l DEVICE] [-b BPS] [-t HOST] [-p PORT]
-                        [-s PORT]
+usage: py_tsip_proxy.py [-h] [-t PORT] [-b BAUD] [-l PORT] [-m PORT] [-o FMT]
+                        TTY|HOST
+
+positional arguments:
+  TTY|HOST              Connect to serial device or host via the network.
 
 optional arguments:
   -h, --help            show this help message and exit
-  -l DEVICE, --serial_line DEVICE
-                        Device to open, default /dev/ttyUSB0
-  -b BPS, --serial_baud BPS
-                        Serial port speed in bits per second.
-  -t HOST, --tcp-host HOST
-                        Hostname to connect to (via TCP, overrides serial)
-  -p PORT, --tcp-port PORT
-                        Port number for outbound tcp-connection.
-  -s PORT, --server-port PORT
-                        Port number for inbound tcp-connection.
+  -t PORT, --tcp PORT   Use TCP connection to port.
+  -b BAUD, --baud BAUD  Baudrate to use on serial device (def: 9600)
+  -l PORT, --listen PORT
+                        Listen for local connections on tcp port whose packets
+                        will be forwarded to the device (def: 4321).
+  -m PORT, --listen-mute PORT
+                        Listen for local connections on tcp port whose packets
+                        will not be forwarded to the device (def: None).
+  -o FMT, --logfile FMT
+                        Write primary timing information to logfile.
 
+*** Running the Program ***
 
 Run on the device connected to your GPS' serial port as such:
 
-   ./py_tsip_proxy.py -l /dev/ttyUSB0 -b 9600
+   ./py_tsip_proxy.py -b 9600 /dev/ttyUSB0 
 
 ...or, when the GPS is connected to a terminal server, at the given
 address and port (in this example: host 192.168.2.134, port 4001):
 
-   ./py_tsip_proxy.py -t 192.168.2.134 -p 4001
+   ./py_tsip_proxy.py -t 4001 192.168.2.134
 
 Then you can connect to the local machine running the proxy at port 4001.
-This port can be changed using the "-s PORT" option.
+This port can be changed using the "-l PORT" option.
+
+*** Muted Clients ***
+
+If you want to allow some software to receive TSIP packets, but not be able to
+send them to the thunderbolt, then use the "-m PORT" option to start up
+a second port whose sent data will be thrown away.
+
+*** Logfiles ***
+
+Logfiles will be written when giving the "-o" option. With a option of
+"-o logfile", filenames will be logfile_20170903.txt (yyyymmdd: four digit
+year, two digit month, two digit day) and re-created daily.
+
+Contents of the logfile is:
+
+                  --GPS--
+Unix Timestamp  TOW    week tfl  r d critic minor  dec  a offs   dac      temp
+--------------:-------:----:----:-:-:------:------:----:-:------:--------:------
+1504389595.191  597613  940 0x00 7 0 0x0000 0x0000 0x00 0 -1.901 +0.07811 40.215
+1504389596.191  597614  940 0x00 7 0 0x0000 0x0000 0x00 0 -2.038 +0.07811 40.215
+1504389597.191  597615  940 0x00 7 0 0x0000 0x0000 0x00 0 -2.162 +0.07811 40.215
+1504389598.191  597616  940 0x00 7 0 0x0000 0x0000 0x00 0 -2.243 +0.07811 40.215
+
+  tfl: Timing Flags, r: receiver mode, d: disciplining mode,
+  critic: critical alarms, minor: minor alarms, dec: GPS decoding status,
+  a: disciplining activity, offs: PPS offset (ns), dac: DAC output (volt),
+  temp: temperature (degrees celsius)
+
+The flags are explained in the manual you can find with a web search:
+ Trimble Thunderbolt E GPS Disciplined Clock User Guide Appendix A
+See the sections on
+ Report Packet 0x8F-AB Primary Timing Packet
+and
+ Report Packet 0x8F-AC Supplemental Timing Packet.

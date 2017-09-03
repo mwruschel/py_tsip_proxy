@@ -5,7 +5,7 @@ import asyncio
 import struct
 import logging
 import datetime
-
+import math
 from logging import debug, info, warning, error, critical
 
 # https://pypi.python.org/pypi/pyserial-asyncio
@@ -30,11 +30,36 @@ Pkt_Supplemental_Timing = namedtuple('Supplemental_Timing', [
     'dac_voltage', 'temperature', 'latitude', 'longitude', 'altitude',
     'pps_quantization_error', 'spare'])
 
+Pkt_Raw_Data_Measurement_Data = namedtuple('Raw_Data_Measurement_Data', [
+        'sv_prn', 'sample_length', 'signal_level', 'code_phase',
+        'doppler', 'time_of_measurement'
+    ])
+
+Pkt_Satellite_Tracking_Status = namedtuple('Satellite_Tracking_Status', [
+        'sv_prn',               # B  # 1-31
+        'slot_and_ch_number',   # B  7-3=ch, 2-0=slot (unused)
+        'acquisition_flat',     # B  0: never acq., 1: acq., 2: reopened search
+        'ephemeris_flag',       # B  0: flag not set, >0: good ephemeris
+        'signal_level',             # f AMU
+        'time_of_last_measurement', # f sec
+        'elevation',                # f radians
+        'azimuth',                  # f radians
+        'old_measurement_flag',     # B 0: not seg >0: measurement old
+        'integer_msec_flag',        # B 0: unknown, 1: subframe, 2: bitcrossing,
+                                    #     3: verified, 4: suspect error
+        'bad_data_flag',            # B 0: flag unset, 1: bad parity, 2: bad ephemeris
+        'data_collection_flag',     # B 0: unset, 1: collection in progress
+    ])
+
 SIMPLE_PACKETS = {
     # Thunderbolt-2012-02.pdf, Appendix A, Page 79
     '8f-ab': ( '>xIHhBBBBBBH',           Pkt_Primary_Timing      ),
     # Thunderbolt-2012-02.pdf, Appendix A, Page 82
-    '8f-ac': ( '>xBBBIHHBBBBffIffdddfI', Pkt_Supplemental_Timing )
+    '8f-ac': ( '>xBBBIHHBBBBffIffdddfI', Pkt_Supplemental_Timing ),
+    # Thunderbolt-2012-02.pdf, Appendix A, Page 56
+    '5a':    ( '>Bffffd',                Pkt_Raw_Data_Measurement_Data ),
+    # Thunderbolt-2012-02.pdf, Appendix A, Page 57
+    '5c':    ( '>BBBBffffBBBB',          Pkt_Satellite_Tracking_Status ),
 }
 
 class TSIP_Protocol(asyncio.Protocol) :
@@ -184,14 +209,32 @@ class TSIP_Protocol_Slave(TSIP_Protocol) :
             self.master.send_packet(pkt)
 
 class TSIP_Logger :
-    def __init__(self, logfile_basename) :
+    def __init__(self, logfile_basename, master) :
+        self.master = master
         self.name = 'Logger'
         self.logfile_basename = logfile_basename
-        self.primary_timing = None
 
-        self.f_lines = None
+        ###
+        # logfile filehandle and name
+        ###
         self.f = None
         self.fn = None
+
+        ###
+        # remember last primary timing information, we dump on reception
+        # of supplemental timing
+        ###
+        self.primary_timing = None
+
+        ###
+        # accumulate sat info, also remember last time when satinfo
+        # has been received, so that we can request an update from the receiver
+        ###
+        self.satinfo = dict()
+        self.sattrack = dict()
+        self.last_satinfo = datetime.datetime.now()
+
+        self.master.register_slave(self)
 
     # decoding --------------------------------------------------------------
     def decode_simple(self, msgid, payload) :
@@ -199,9 +242,8 @@ class TSIP_Logger :
             pkt_id = '%02x-%02x'%(msgid, payload[0])
             simple_decoder = SIMPLE_PACKETS.get(pkt_id)
         if not simple_decoder :
-            pkt_id = '%02x'%(payload[0])
+            pkt_id = '%02x'%(msgid)
             simple_decoder = SIMPLE_PACKETS.get(pkt_id)
-
         if not simple_decoder :
             return None, payload
 
@@ -217,22 +259,46 @@ class TSIP_Logger :
         if len(pkt) == 0 :
             return
         pkt_id, data = self.decode_simple(pkt[0], pkt[1:])
+        if pkt_id is None :
+            return
 
-        if type(data) == Pkt_Primary_Timing :
+        if type(data) is Pkt_Primary_Timing :
             self.primary_timing = data
             return
 
-        if type(data) is not Pkt_Supplemental_Timing :
+        now = datetime.datetime.now()
+
+        if type(data) is Pkt_Raw_Data_Measurement_Data :
+            self.last_satinfo = now
+            self.satinfo[data.sv_prn] = data
             return
-        if self.primary_timing is None :
+
+        if type(data) is Pkt_Satellite_Tracking_Status :
+            self.last_satinfo = now
+            self.sattrack[data.sv_prn] = data
             return
+
+        # we only continue when we have primary and suppmental timing information
+        if type(data) is not Pkt_Supplemental_Timing or self.primary_timing is None:
+            return
+
+        ###
+        # check whether we need to request new sat info
+        ###
+        dt_satinfo = now - self.last_satinfo
+        if dt_satinfo.total_seconds() > 10 :
+            self.last_satinfo = now
+            # Command Packet 0x3A: Request Last Raw Measurement
+            # Byte 0: Satellite PRN (1-31, or 0 for all)
+            debug('%s Send 0x3A: Request Last Raw Measurement', self.name)
+            self.master.send_packet(b'\x3a\x00')
+            # Command Packet 0x3C: Request Satellite Tracking Status
+            self.master.send_packet(b'\x3c\x00')
 
         ###
         # we have a "primary timing" dataset stored, and this packet
         # is a "supplemental timing" packet -> write out to logfile
         ###
-
-        now = datetime.datetime.now()
         new_fn = self.logfile_basename + now.strftime('_%Y%m%d.txt')
         if not self.f or (new_fn != self.fn) :
             if self.f :
@@ -253,6 +319,31 @@ class TSIP_Logger :
             s.minor_alarms, s.gpsdecoding_status, s.disciplining_activity,
             s.pps_offset, s.dac_voltage, s.temperature
         ), file=self.f)
+
+        for prn in set(self.satinfo).union(self.sattrack) :
+            satinfo = self.satinfo.get(prn)
+            track = self.sattrack.get(prn)
+            print('# SAT %02d'%(prn), file=self.f, end='')
+
+            if satinfo :
+                print(' %5.2f %7.1f %7.1f'%(
+                    satinfo.signal_level, satinfo.code_phase, satinfo.doppler),
+                    file=self.f, end='')
+            else :
+                print('     -       -       -', file=self.f, end='')
+
+            if track :
+                print(' %5.2f %5.1f %5.1f'%(
+                    track.signal_level,
+                    track.azimuth*(180./math.pi),
+                    track.elevation*(180./math.pi)), file=self.f)
+            else :
+                print('     -     -     -', file=self.f)
+
+        self.satinfo.clear()
+        self.sattrack.clear()
+
+        self.f.flush()
 
     send_packet = process_packet
 
@@ -324,8 +415,7 @@ packets will not be forwarded to the device (def: None).''')
         loop.run_until_complete(bind_future)
 
     if args.logfile :
-        logger = TSIP_Logger(args.logfile)
-        protocol_master.register_slave(logger)
+        logger = TSIP_Logger(args.logfile, protocol_master)
 
     loop.run_forever()
 

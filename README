@@ -22,6 +22,7 @@ optional arguments:
                         will not be forwarded to the device (def: None).
   -o FMT, --logfile FMT
                         Write primary timing information to logfile.
+  -d, --debug           Write packets sent/received by each client.
 
 *** Running the Program ***
 
@@ -34,7 +35,7 @@ address and port (in this example: host 192.168.2.134, port 4001):
 
    ./py_tsip_proxy.py -t 4001 192.168.2.134
 
-Then you can connect to the local machine running the proxy at port 4001.
+Then you can connect to the local machine running the proxy at port 4321.
 This port can be changed using the "-l PORT" option.
 
 *** Muted Clients ***
@@ -70,3 +71,63 @@ See the sections on
  Report Packet 0x8F-AB Primary Timing Packet
 and
  Report Packet 0x8F-AC Supplemental Timing Packet.
+
+*** Debug ***
+
+With the "-d" flag, all packets received from each client will be printed
+in an abbreviated form:
+
+timestamp               receiving connection            packet len payload
+-----------------------:----------------------------:--:-----:----:----------------------
+2017-09-03 11:35:17,045 Master 192.168.178.59/4001   << 8f-ab (18) 8fab000086e703ad0012..
+2017-09-03 11:35:17,110 Master 192.168.178.59/4001   << 6d-5d (23) 6d5d0000000000000000..
+2017-09-03 11:35:17,113 Slave  127.0.0.1/32842       << 1f    (01) 1f
+2017-09-03 11:35:17,133 Slave  127.0.0.1/32842       << 8e-41 (02) 8e41
+2017-09-03 11:35:17,153 Slave  127.0.0.1/32842       << 8e-42 (02) 8e42
+2017-09-03 11:35:17,173 Slave  127.0.0.1/32842       << 1c-01 (02) 1c01
+2017-09-03 11:35:17,194 Slave  127.0.0.1/32842       << 1c-03 (02) 1c03
+2017-09-03 11:35:17,214 Slave  127.0.0.1/32842       << 3c-46 (02) 3c46
+2017-09-03 11:35:17,220 Master 192.168.178.59/4001   << 8f-ac (69) 8fac070001000000f000..
+
+"packet" is just the first two bytes of the payload. Payload is just a hexdump.
+
+*** Typical Usage ***
+
+	[thinkstation /home/chris/py_tsip_proxy (master)]
+	$ ./py_tsip_proxy.py -o logfile -m 4322 -t 4001 192.168.178.59 
+	2017-09-03 11:36:39,567 Master 192.168.178.59/4001   Connection made.
+	2017-09-03 11:36:39,568 Master 192.168.178.59/4001   new slave Logger
+	2017-09-03 11:36:40,221 Logger: appending to logfile logfile_20170903.txt.
+	(...)
+
+Then, you can start "Lady Heather" (the most famous monitoring tool) with
+the following command line:
+
+	wine ./heather.exe /ip=127.0.0.1:4321 /vx /ta /wa=tbolt.log /tw=100
+
+The proxy will then output a few "received junk" lines as heather tries to
+probe several different types of GPS receivers:
+
+	(...)
+	2017-09-03 11:41:26,138 Slave  127.0.0.1/46904       Connection made.
+	2017-09-03 11:41:26,138 Master 192.168.178.59/4001   new slave Slave  127.0.0.1/46904      
+	2017-09-03 11:41:26,557 Slave  127.0.0.1/46904       received junk byte 3f
+	2017-09-03 11:41:26,557 Slave  127.0.0.1/46904       received junk byte 57
+	2017-09-03 11:41:26,557 Slave  127.0.0.1/46904       received junk byte 41
+
+You can run the Thunderbolt Monitor also via wine, but you have to redirect
+the COM port.
+
+	# Workaround: wine seems to re-create the links in ~/.wine/dosdevices
+	# upon first start, so first run a dummy application and leave it
+	# running until tboltmon has opened its com port.
+
+	wine notepad.exe
+
+	cd ~/.wine/dosdevices
+	socat pty,link=./com1,raw,echo=0 tcp:localhost:4321 &
+	cd ~/.wine/drive_c/Tboltmon/
+	wine ./tboltmon.exe
+	  -> choose com1
+
+

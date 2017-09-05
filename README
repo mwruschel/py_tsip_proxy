@@ -1,28 +1,50 @@
 py_tsip_proxy : a simple proxy for a Trimble Thunderbolt GPS
 
-
 This is a simple proxy so that several clients can talk to a Trimble
 Thunderbolt GPS in parallel.
 
-usage: py_tsip_proxy.py [-h] [-t PORT] [-b BAUD] [-l PORT] [-m PORT] [-o FMT]
-                        TTY|HOST
+: usage: py_tsip_proxy.py [-h] [-d] [-t PORT] [-b BAUD] [-l PORT] [-m PORT]
+:                         [-o FMT] [-f]
+:                         TTY|HOST
+: 
+: optional arguments:
+:   -h, --help            show this help message and exit
+:   -d, --debug           Write packets sent/received by each client. (def:
+:                         don't)
+: 
+: Serial or Network Connection to GPS Device:
+:   -t PORT, --tcp PORT   Use TCP connection and specify port number. (def: use
+:                         serial)
+:   -b BAUD, --baud BAUD  Baudrate to use on serial device (def: 9600)
+:   TTY|HOST              Serial device or hostname when using TCP connection.
+: 
+: Listening Sockets:
+:   -l PORT, --listen PORT
+:                         Listen for local connections on tcp port whose packets
+:                         will be forwarded to the device (def: 4321).
+:   -m PORT, --listen-mute PORT
+:                         Listen for local connections on tcp port whose packets
+:                         will not be forwarded to the device (def: None).
+: 
+: Logging to ASCII Files:
+:   -o FMT, --logfile FMT
+:                         Write GPS stats (primary and supplemental timing
+:                         information and GPS satellite data) to logfile. (def:
+:                         no logfile)
+:   -f, --flush           Flush logfiles after each line. Useful if you are
+:                         watching with "tail -f", but wears out storage faster
+:                         as the file will fsync() after every single line.
+:                         (def: no flush)
 
-positional arguments:
-  TTY|HOST              Connect to serial device or host via the network.
+*** Prerequisites ***
 
-optional arguments:
-  -h, --help            show this help message and exit
-  -t PORT, --tcp PORT   Use TCP connection to port.
-  -b BAUD, --baud BAUD  Baudrate to use on serial device (def: 9600)
-  -l PORT, --listen PORT
-                        Listen for local connections on tcp port whose packets
-                        will be forwarded to the device (def: 4321).
-  -m PORT, --listen-mute PORT
-                        Listen for local connections on tcp port whose packets
-                        will not be forwarded to the device (def: None).
-  -o FMT, --logfile FMT
-                        Write primary timing information to logfile.
-  -d, --debug           Write packets sent/received by each client.
+This program requires pyserial-asyncio. You can get it here:
+
+	https://pypi.python.org/pypi/pyserial-asyncio
+
+Install via...
+  $ pip install pyserial-asyncio
+(maybe use pip install --user, or use a virtualenv).
 
 *** Running the Program ***
 
@@ -86,6 +108,11 @@ See the sections on
  Report Packet 0x8F-AB Primary Timing Packet
 and
  Report Packet 0x8F-AC Supplemental Timing Packet.
+
+If you specify the "--flush"/"-f" option, then the file will be synced
+to disk after every single line. So every line will be visible when
+doing a "tail -f", but it will also wear out your storage, e.g. sd-cards,
+much faster.
 
 *** Debug ***
 

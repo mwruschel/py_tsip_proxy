@@ -217,9 +217,10 @@ class TSIP_Protocol_Slave(TSIP_Protocol) :
             self.master.send_packet(pkt)
 
 class TSIP_Logger :
-    def __init__(self, logfile_basename, master) :
+    def __init__(self, logfile_basename, master, do_flush=False) :
         self.master = master
         self.name = 'Logger'
+        self.do_flush = do_flush
         self.logfile_basename = logfile_basename
 
         ###
@@ -348,10 +349,11 @@ class TSIP_Logger :
             else :
                 print('     -     -     -', file=self.f)
 
+        if self.do_flush :
+            self.f.flush()
+
         self.satinfo.clear()
         self.sattrack.clear()
-
-        self.f.flush()
 
     send_packet = process_packet
 
@@ -383,6 +385,11 @@ packets will not be forwarded to the device (def: None).''')
     parser.add_argument('-o', '--logfile', dest='logfile',
         type=str, action='store', default=None, metavar='FMT',
         help='''Write primary timing information to logfile.''')
+
+    parser.add_argument('-f', '--flush', action='store_true',
+            default=False, help='''Flush logfiles after each line. Useful
+            if you are watching with "tail -f", but wears out storage
+            faster as the file will fsync() after every single line.''')
 
     parser.add_argument('-d', '--debug', action='store_true', default=False,
         help='''Write packets sent/received by each client.''')
@@ -423,7 +430,7 @@ packets will not be forwarded to the device (def: None).''')
         loop.run_until_complete(bind_future)
 
     if args.logfile :
-        logger = TSIP_Logger(args.logfile, protocol_master)
+        logger = TSIP_Logger(args.logfile, protocol_master, args.flush)
 
     loop.run_forever()
 

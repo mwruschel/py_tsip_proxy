@@ -364,39 +364,47 @@ def main() :
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-t', '--tcp', metavar='PORT', dest='tcp_port',
-        type=int, action='store', default=None,
-        help='Use TCP connection to port.')
+    parser.add_argument('-d', '--debug', action='store_true', default=False,
+            help='''Write packets sent/received by each client. (def: don't)''')
 
-    parser.add_argument('-b', '--baud', dest='baud',
+    grp = parser.add_argument_group('Serial or Network Connection to GPS Device')
+
+    grp.add_argument('-t', '--tcp', metavar='PORT', dest='tcp_port',
+        type=int, action='store', default=None,
+        help='Use TCP connection and specify port number. (def: use serial)')
+
+    grp.add_argument('-b', '--baud', dest='baud',
         type=int, action='store', default=9600,
         help='Baudrate to use on serial device (def: 9600)')
 
-    parser.add_argument('-l', '--listen', dest='listen',
+    grp.add_argument('tty_or_host', metavar='TTY|HOST',
+        type=str, action='store', default=None,
+        help='Serial device or hostname when using TCP connection.')
+
+    grp = parser.add_argument_group('Listening Sockets')
+
+    grp.add_argument('-l', '--listen', dest='listen',
         type=int, action='store', default=4321, metavar='PORT',
         help='''Listen for local connections on tcp port whose
 packets will be forwarded to the device (def: 4321).''')
 
-    parser.add_argument('-m', '--listen-mute', dest='listen_mute',
+    grp.add_argument('-m', '--listen-mute', dest='listen_mute',
         type=int, action='store', default=None, metavar='PORT',
         help='''Listen for local connections on tcp port whose
 packets will not be forwarded to the device (def: None).''')
 
-    parser.add_argument('-o', '--logfile', dest='logfile',
-        type=str, action='store', default=None, metavar='FMT',
-        help='''Write primary timing information to logfile.''')
+    grp = parser.add_argument_group('Logging to ASCII Files')
 
-    parser.add_argument('-f', '--flush', action='store_true',
+    grp.add_argument('-o', '--logfile', dest='logfile',
+        type=str, action='store', default=None, metavar='FMT',
+        help='''Write GPS stats (primary and supplemental timing
+        information and GPS satellite data) to logfile. (def: no logfile)''')
+
+    grp.add_argument('-f', '--flush', action='store_true',
             default=False, help='''Flush logfiles after each line. Useful
             if you are watching with "tail -f", but wears out storage
-            faster as the file will fsync() after every single line.''')
-
-    parser.add_argument('-d', '--debug', action='store_true', default=False,
-        help='''Write packets sent/received by each client.''')
-
-    parser.add_argument('tty_or_host', metavar='TTY|HOST',
-        type=str, action='store', default=None,
-        help='Connect to serial device or host via the network.')
+            faster as the file will fsync() after every single line. (def:
+            no flush)''')
 
     args = parser.parse_args()
 

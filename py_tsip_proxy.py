@@ -362,7 +362,16 @@ def main() :
     import argparse
     import logging
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='''
+py_tsip_proxy is a proxy for the Trimble Standard Interface Protocol
+(TSIP). It allows several clients to connect to one single TSIP capable
+device. Assuming the TSIP capable device is a GPS controlled clock (e.g.
+timing standard, GPSDO (GPS disciplined oscillator), a logfile can be
+written to disk for monitoring purposes.
+
+This software lives at https://github.com/vogelchr/py_tsip_proxy and has
+been tested with a Trimbe Thunderbolt http://www.leapsecond.com/tbolt-faq.htm.
+''')
 
     parser.add_argument('-d', '--debug', action='store_true', default=False,
             help='''Write packets sent/received by each client. (def: don't)''')
@@ -396,9 +405,11 @@ packets will not be forwarded to the device (def: None).''')
     grp = parser.add_argument_group('Logging to ASCII Files')
 
     grp.add_argument('-o', '--logfile', dest='logfile',
-        type=str, action='store', default=None, metavar='FMT',
+        type=str, action='store', default=None, metavar='BASE',
         help='''Write GPS stats (primary and supplemental timing
-        information and GPS satellite data) to logfile. (def: no logfile)''')
+        information and GPS satellite data) to logfile, files will be
+        named BASE_YYYYmmdd.txt and reopened at midnight local time.
+        (def: no logfile)''')
 
     grp.add_argument('-f', '--flush', action='store_true',
             default=False, help='''Flush logfiles after each line. Useful

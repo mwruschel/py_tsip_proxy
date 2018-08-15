@@ -1,0 +1,10 @@
+[Unit]
+Description=TSIP Proxy for GPS
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/py_tsip_proxy.py -o /var/log/gps/gps_ttyS0 /dev/ttyS0
+
+[Install]
+WantedBy=multi-user.target
